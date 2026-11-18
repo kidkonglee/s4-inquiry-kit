@@ -22,7 +22,9 @@ python3 backend/server.py
 
 If `.env` already exists, skip `tools/init.py`; the initializer will preserve the existing file. Keep Terminal running while using the app. Press Control+C to stop the server.
 
-The default `docs/config.js` contains `apiBase: ""`, which uses the local API on port 8000. If you previously configured ngrok, restore this empty value for a local-only test.
+The deployed `docs/config.js` points to this Mac's ngrok HTTPS URL. For a local-only test without ngrok, change it to `apiBase: ""`, which uses the local API on port 8000.
+
+The deployed student site is <https://kidkonglee.github.io/s4-inquiry-kit/>. It still requires the MacBook backend and ngrok to be running to receive student records.
 
 ## 3. Open both pages
 

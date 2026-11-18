@@ -2,11 +2,13 @@
 
 這是一套可本地運行、可部署至 GitHub Pages 的教學試點原型。學生使用 HTML 學案、拖動條仿真、實驗表格與散點圖；教師在 MacBook 查看進度、答案修訂、實驗過程並評分。
 
+學生網址：<https://kidkonglee.github.io/s4-inquiry-kit/>。教師在提供服務的 MacBook 開啟 <http://127.0.0.1:8000/teacher>。目前由 MacBook 後端及 ngrok 接收資料；即使 GitHub 網頁能開啟，MacBook 後端與 ngrok 仍必須運行，才能接收新紀錄。
+
 第一份物理學案為暫定示範，尚未對齊使用者課本。目前仿真引擎只支援「恆定合力、質量、加速度」模型。可以批量製作同一模型家族的學案；其他科目／模型須另外開發並驗證，不能只換標題。
 
 ## 先試用，約 3 分鐘
 
-需要 Python 3.10 或更新版本，不需要 npm 或 Python 套件。以下命令在本資料夾內執行。`docs/config.js` 已預設 `apiBase: ""`，可直接純本地運行。英文快速啟動說明見 [QUICKSTART.md](QUICKSTART.md)。
+需要 Python 3.10 或更新版本，不需要 npm 或 Python 套件。以下命令在本資料夾內執行。目前 `docs/config.js` 已接上本次 ngrok HTTPS 網址；若要完全不依賴 ngrok 的純本地測試，先把 `apiBase` 改成空字串 `""`。英文快速啟動說明見 [QUICKSTART.md](QUICKSTART.md)。
 
 ```sh
 python3 --version
@@ -40,7 +42,7 @@ python3 backend/server.py
 
 前端在答案停止輸入約 0.7 秒後保存、滑桿放開後記錄變量、按實驗按鈕時記錄試驗。資料即時嘗試上傳，失敗每 10 秒重試；教師控制台每 10 秒更新。這是近即時監察，並非毫秒級直播。
 
-交付版預設純本地運行，不依賴 ngrok。使用平板公網存取時，需啟動 Python 和 `ngrok http 8000`，並將返回的 HTTPS API 網址填入 `docs/config.js`。正式 GitHub Pages 的 Origin 亦需按手冊填入本地 `.env`。之前的 ngrok 實測已通過，測試隧道與服務已停止。
+本次部署已設定 ngrok API 網址及 `https://kidkonglee.github.io` 的來源白名單。重新啟動 Mac 後，需手動啟動 Python 和 `ngrok http 8000 --inspect=false`；核對返回網址與 `docs/config.js` 相符。自動啟動尚未完成。更換 ngrok 帳戶或 GitHub 網域時，需更新網址與白名單。
 
 後端確認 SQLite 交易提交後才回覆已接收。重傳沿用事件編號以避免重複計數。平板保存待傳佇列，並可匯出無登入權杖的備份；匯出檔目前供教師人工補證，沒有自動匯入評分功能。
 
