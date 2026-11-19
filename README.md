@@ -2,21 +2,23 @@
 
 這是一套可本地運行、可部署至 GitHub Pages 的教學試點原型。學生使用 HTML 學案、拖動條仿真、實驗表格與散點圖；教師在 MacBook 查看進度、答案修訂、實驗過程並評分。
 
-學生網址：<https://kidkonglee.github.io/s4-inquiry-kit/>。教師在提供服務的 MacBook 開啟 <http://127.0.0.1:8000/teacher>。目前由 MacBook 後端及 ngrok 接收資料；即使 GitHub 網頁能開啟，MacBook 後端與 ngrok 仍必須運行，才能接收新紀錄。
+學生網址：<https://kidkonglee.github.io/s4-inquiry-kit/>。教師在提供服務的 MacBook 開啟 <http://127.0.0.1:8001/teacher>。目前由 MacBook 後端及 ngrok 接收資料；即使 GitHub 網頁能開啟，MacBook 後端與 ngrok 仍必須運行，才能接收新紀錄。
 
 第一份物理學案為暫定示範，尚未對齊使用者課本。目前仿真引擎只支援「恆定合力、質量、加速度」模型。可以批量製作同一模型家族的學案；其他科目／模型須另外開發並驗證，不能只換標題。
 
 ## 先試用，約 3 分鐘
 
-需要 Python 3.10 或更新版本，不需要 npm 或 Python 套件。以下命令在本資料夾內執行。目前 `docs/config.js` 已接上本次 ngrok HTTPS 網址；若要完全不依賴 ngrok 的純本地測試，先把 `apiBase` 改成空字串 `""`。英文快速啟動說明見 [QUICKSTART.md](QUICKSTART.md)。
+安全加固版使用 Flask＋Waitress，需要受支援且已安裝安全更新的 Python，以及 requirements.txt 中的套件；不需要 npm。以下命令在本資料夾內執行。目前 `docs/config.js` 已接上本次 ngrok HTTPS 網址；學生使用 GitHub Pages 網頁，本機 8000 只提供 API，8001 提供教師控制台。英文快速啟動說明見 [QUICKSTART.md](QUICKSTART.md)。
 
 ```sh
 python3 --version
-python3 tools/init.py
-python3 backend/server.py
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python tools/init.py
+python3 tools/start_server.py
 ```
 
-學生頁面：<http://127.0.0.1:8000>；教師頁面：<http://127.0.0.1:8000/teacher>。不要直接雙擊 HTML，以免瀏覽器阻擋讀取學案 JSON。
+學生頁面：<https://kidkonglee.github.io/s4-inquiry-kit/>；8000 埠只供學生 API 使用，不能再開教師頁；教師頁面：<http://127.0.0.1:8001/teacher>。不要直接雙擊 HTML，以免瀏覽器阻擋讀取學案 JSON。
 
 用文字編輯器打開本地 `.env`，將 `ADMIN_TOKEN=` 後面的值貼到教師登入框。該金鑰只屬於教師，切勿放進前端設定或派給學生。
 
@@ -31,11 +33,12 @@ python3 backend/server.py
 3. [每節課批量生成學案](guides/03-學案生產與提示詞.md)：教材輸入表、可重用 AI 提示詞、驗證與發佈流程。
 4. [檢驗報告](guides/04-檢驗報告.md)：實際通過的項目及未驗證的邊界。
 5. [本次部署狀態](guides/05-本次部署狀態.md)：已上線網址、實際 Pages 傳輸驗收、重啟方法與待完成事項。
+6. [安全加固與使用](guides/06-安全加固與使用.md)：最新版入口、限制、啟動方式及需要本人完成的系統設定。
 
 ## 功能與資料
 
 - `docs/`：唯一應由 GitHub Pages 發佈的目錄，全部是公開靜態檔案。
-- `backend/`：MacBook 上運行的 API 與教師頁面，使用 Python 標準函式庫及 SQLite。
+- `backend/`：MacBook 上運行的 API 與教師頁面，使用 Flask、Waitress 及 SQLite。
 - `tools/`：初始化、學案驗證上架、SQLite 一致性備份工具。
 - `tests/`：可重新執行的後端測試。執行 `python3 -m unittest discover -s tests -v`。
 - `.env`：本地教師金鑰及 CORS 設定，已被 `.gitignore` 排除。
@@ -43,7 +46,7 @@ python3 backend/server.py
 
 前端在答案停止輸入約 0.7 秒後保存、滑桿放開後記錄變量、按實驗按鈕時記錄試驗。資料即時嘗試上傳，失敗每 10 秒重試；教師控制台每 10 秒更新。這是近即時監察，並非毫秒級直播。
 
-本次部署已設定 ngrok API 網址及 `https://kidkonglee.github.io` 的來源白名單。重新啟動 Mac 後，需手動啟動 Python 和 `ngrok http 8000 --inspect=false`；核對返回網址與 `docs/config.js` 相符。自動啟動尚未完成。更換 ngrok 帳戶或 GitHub 網域時，需更新網址與白名單。
+本次部署已設定 ngrok API 網址及 `https://kidkonglee.github.io` 的來源白名單。重新啟動 Mac 後，需手動啟動 Python 和 `python3 tools/start_tunnel.py`；核對返回網址與 `docs/config.js` 相符。自動啟動尚未完成。更換 ngrok 帳戶或 GitHub 網域時，需更新網址與白名單。
 
 後端確認 SQLite 交易提交後才回覆已接收。重傳沿用事件編號以避免重複計數。平板保存待傳佇列，並可匯出無登入權杖的備份；匯出檔目前供教師人工補證，沒有自動匯入評分功能。
 

@@ -1,8 +1,5 @@
-"""Small classroom pilot server. Python standard library only; run behind ngrok HTTPS."""
-import csv
-import io
+"""Separate public student API and loopback teacher service, served by Waitress."""
 import json
-import mimetypes
 import os
 import secrets
 import sqlite3
@@ -11,7 +8,11 @@ import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
+from flask import Flask, Response, request, send_file
+from werkzeug.exceptions import HTTPException
+from waitress import create_server
+from security import RateLimiter, LimitReached
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from core import digest, validate_lesson, clean_event, summarize
@@ -25,6 +26,32 @@ ADMIN = os.getenv('ADMIN_TOKEN', '')
 ORIGINS = set(filter(None, os.getenv('ALLOWED_ORIGINS', 'http://127.0.0.1:8000,http://localhost:8000').split(',')))
 DB = Path(os.getenv('CLASSROOM_DB', str(ROOT / 'private/classroom.sqlite')))
 PORT = int(os.getenv('PORT', '8000'))
+ADMIN_PORT = int(os.getenv('ADMIN_PORT', '8001'))
+PUBLIC_ROUTES = {'/api/health': {'GET'}, '/api/join': {'POST'}, '/api/me': {'GET'}, '/api/events': {'POST'}}
+ADMIN_ORIGINS = {'http://127.0.0.1:' + str(ADMIN_PORT), 'http://localhost:' + str(ADMIN_PORT)}
+PUBLIC_HOSTS = {'127.0.0.1', 'localhost'} | {urlparse(x).hostname for x in ORIGINS if urlparse(x).hostname}
+LIMITER = RateLimiter()
+MAX_EVENTS = int(os.getenv('MAX_STUDENT_EVENTS', '5000'))
+MAX_TRIALS = int(os.getenv('MAX_STUDENT_TRIALS', '300'))
+MAX_BYTES = int(os.getenv('MAX_STUDENT_BYTES', '2000000'))
+MAX_DB_BYTES = int(os.getenv('MAX_DB_BYTES', '536870912'))
+
+
+def storage_available():
+    return sum(p.stat().st_size for p in (DB, Path(str(DB) + '-wal'), Path(str(DB) + '-shm')) if p.exists()) < MAX_DB_BYTES
+
+
+def json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('JSON 包含重複欄位')
+        result[key] = value
+    return result
+
+
+def reject_constant(value):
+    raise ValueError('JSON 不接受非有限數值')
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -41,6 +68,7 @@ def db():
         c.close()
 
 def init():
+    os.umask(0o077)
     DB.parent.mkdir(parents=True, exist_ok=True)
     DB.parent.chmod(0o700)
     with db() as c:
@@ -67,72 +95,81 @@ def catalog():
     items = json.loads((ROOT / 'docs/lessons/catalog.json').read_text())
     return [(item, validate_lesson(json.loads((ROOT / 'docs/lessons' / Path(item['file']).name).read_text()))) for item in items]
 
-class Handler(BaseHTTPRequestHandler):
-    server_version = 'InquiryClassroom'
-
-    def setup(self):
-        super().setup()
-        self.connection.settimeout(15)
-
-    def log_message(self, fmt, *args):
-        pass  # No request bodies, credentials, names, or URL queries in logs.
+class Service:
+    def __init__(self, role):
+        self.role = role
+        self.headers = request.headers
+        self.command = request.method
+        self.path = request.path + ('?' + request.query_string.decode('utf-8') if request.query_string else '')
 
     def send(self, status=200, data=None, content_type='application/json; charset=utf-8'):
         raw = data if isinstance(data, bytes) else json.dumps(data, ensure_ascii=False, allow_nan=False).encode()
-        self.send_response(status)
-        origin = self.headers.get('Origin')
-        if origin in ORIGINS:
-            self.send_header('Access-Control-Allow-Origin', origin)
-            self.send_header('Vary', 'Origin')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization, ngrok-skip-browser-warning')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Max-Age', '600')
-        self.send_header('Cache-Control', 'no-store')
-        self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('Referrer-Policy', 'no-referrer')
-        self.send_header('Content-Type', content_type)
-        self.send_header('Content-Length', str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
-
-    def do_OPTIONS(self):
-        self.send(204, b'')
-
-    def do_GET(self): self.dispatch()
-    def do_POST(self): self.dispatch()
+        return Response(raw, status=status, content_type=content_type)
 
     def dispatch(self):
         try:
-            if self.command == 'POST' and self.headers.get('Origin') and self.headers['Origin'] not in ORIGINS:
-                return self.send(403, {'error': '前端來源未列入 ALLOWED_ORIGINS'})
-            self.route()
+            path = request.path
+            if self.role == 'public':
+                if path not in PUBLIC_ROUTES:
+                    return self.send(404, {'error': '找不到頁面'})
+                if self.command != 'OPTIONS' and self.command not in PUBLIC_ROUTES[path]:
+                    return self.send(405, {'error': '不支援的請求方法'})
+                origins = ORIGINS
+            else:
+                # This listener is never forwarded by ngrok. Ignore all X-Forwarded-* headers.
+                if request.host.split(':')[0] not in {'127.0.0.1', 'localhost'}:
+                    return self.send(400, {'error': '管理入口只限本機'})
+                if self.headers.get('Forwarded') or any(k.lower().startswith('x-forwarded-') for k in self.headers.keys()):
+                    return self.send(403, {'error': '管理入口不接受代理連線'})
+                if not (path.startswith('/api/teacher/') or path in {'/', '/teacher', '/teacher.js', '/style.css'}):
+                    return self.send(404, {'error': '找不到頁面'})
+                origins = ADMIN_ORIGINS
+            origin = self.headers.get('Origin')
+            if origin and origin not in origins:
+                return self.send(403, {'error': '來源未獲允許'})
+            if not LIMITER.allow(('requests', self.role), 2400 if self.role == 'public' else 600):
+                raise LimitReached('請求過於頻繁，請稍後再試')
+            if self.command == 'OPTIONS':
+                return self.send(204, b'')
+            return self.route()
         except PermissionError:
-            self.send(401, {'error': '登入已失效或沒有權限，請重新登入'})
-        except (ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
-            self.send(422, {'error': str(e)[:200]})
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+            return self.send(401, {'error': '登入已失效或沒有權限，請重新登入'})
+        except LimitReached as e:
+            return self.send(429, {'error': str(e)})
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return self.send(422, {'error': '資料格式、課堂狀態或版本不符，請檢查內容後重試'})
+        except HTTPException:
+            raise
         except Exception:
-            print('伺服器錯誤；請檢查本地資料庫與檔案設定。', file=sys.stderr)
-            self.send(500, {'error': '伺服器暫時無法處理；資料仍保留在平板待傳佇列'})
+            print('伺服器錯誤；請檢查本地資料庫與設定。', file=sys.stderr)
+            return self.send(500, {'error': '伺服器暫時無法處理；請保留裝置上的待傳紀錄'})
 
     def body(self):
-        n = int(self.headers.get('Content-Length', '0'))
-        if n < 1 or n > 262144: raise ValueError('請求大小無效')
-        obj = json.loads(self.rfile.read(n))
-        if not isinstance(obj, dict): raise ValueError('請求須為 JSON 物件')
+        if request.mimetype != 'application/json':
+            raise ValueError('只接受 JSON')
+        obj = json.loads(request.get_data(), object_pairs_hook=json_object, parse_constant=reject_constant)
+        if not isinstance(obj, dict):
+            raise ValueError('請求須為 JSON 物件')
         return obj
 
     def token(self):
         return self.headers.get('Authorization', '').removeprefix('Bearer ')
 
     def teacher(self):
-        if not ADMIN or not secrets.compare_digest(self.token(), ADMIN): raise PermissionError()
+        if self.role != 'admin':
+            raise PermissionError()
+        candidate = self.token()
+        if not candidate.isascii() or not ADMIN or not secrets.compare_digest(candidate, ADMIN):
+            if not LIMITER.allow(('teacher_failures',), 20):
+                raise LimitReached('登入失敗過多，請稍後再試')
+            raise PermissionError()
 
     def student(self, c):
         r = c.execute('''SELECT s.*,c.lesson,c.closed FROM sessions t JOIN students s ON s.id=t.student_id
           JOIN classes c ON c.id=s.class_id WHERE t.token_hash=? AND t.expires>?''', (digest(self.token()), time.time())).fetchone()
         if not r: raise PermissionError()
+        if not LIMITER.allow(('student', r['id']), 120):
+            raise LimitReached('同步過於頻繁，請稍後重試')
         return r
 
     def route(self):
@@ -145,12 +182,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.teacher_route(path, q)
         if self.command == 'POST' and path == '/api/join':
             p = self.body()
-            # Persistent student codes are high entropy; rate cap also limits online guesses.
-            minute = int(time.time() // 60)
-            if getattr(self.server, 'join_minute', None) != minute:
-                self.server.join_minute, self.server.join_count = minute, 0
-            self.server.join_count += 1
-            if self.server.join_count > 240: return self.send(429, {'error': '登入請求過多，請一分鐘後再試'})
+            if not LIMITER.allow(('join',), 180):
+                raise LimitReached('登入請求過多，請一分鐘後再試')
+            if len(str(p.get('class_id', ''))) > 64 or len(str(p.get('code', ''))) > 128:
+                raise ValueError('登入資料過長')
             with db() as c:
                 s = c.execute('SELECT s.*,c.lesson,c.closed FROM students s JOIN classes c ON c.id=s.class_id WHERE s.class_id=? AND s.code_hash=?',
                               (str(p.get('class_id', '')).strip(), digest(str(p.get('code', '')).strip()))).fetchone()
@@ -158,6 +193,9 @@ class Handler(BaseHTTPRequestHandler):
                 if s['closed']: raise ValueError('課堂已結束，請聯絡教師')
                 token = secrets.token_urlsafe(32)
                 c.execute('DELETE FROM sessions WHERE expires<?', (time.time(),))
+                if not storage_available():
+                    raise LimitReached('伺服器儲存空間已達安全上限，請聯絡教師')
+                c.execute('DELETE FROM sessions WHERE student_id=? AND token_hash NOT IN (SELECT token_hash FROM sessions WHERE student_id=? ORDER BY expires DESC LIMIT 2)', (s['id'], s['id']))
                 c.execute('INSERT INTO sessions VALUES(?,?,?)', (digest(token), s['id'], time.time() + 43200))
                 return self.send(data={'token': token, 'student_id': s['id'], 'label': s['label'], 'class_id': s['class_id'],
                                        'lesson': json.loads(s['lesson']), 'state': state(c, s['id'])})
@@ -173,28 +211,35 @@ class Handler(BaseHTTPRequestHandler):
                     lesson = json.loads(s['lesson'])
                     clean = [clean_event(e, lesson) for e in batch]
                     c.execute('BEGIN IMMEDIATE')
+                    counts = c.execute('SELECT COUNT(*),COALESCE(SUM(LENGTH(CAST(payload AS BLOB))),0),SUM(CASE WHEN type="trial" THEN 1 ELSE 0 END) FROM events WHERE student_id=?', (s['id'],)).fetchone()
+                    event_count, byte_count, trial_count = counts[0], counts[1], counts[2] or 0
                     for e in clean:
                         old = c.execute('SELECT type,payload FROM events WHERE student_id=? AND event_id=?', (s['id'], e['id'])).fetchone()
                         if old:
                             if old['type'] != e['type'] or json.loads(old['payload']) != e['payload']:
                                 raise ValueError('相同事件編號的內容不一致')
                             continue
+                        if not storage_available():
+                            raise LimitReached('伺服器儲存空間已達安全上限，請匯出備份並聯絡教師')
                         if e['type'] == 'submit' and not state(c, s['id'])['ready']:
                             raise ValueError('請完成所有文字欄位及至少三次實驗後再提交')
+                        payload = json.dumps(e['payload'], ensure_ascii=False)
+                        event_count += 1
+                        byte_count += len(payload.encode('utf-8'))
+                        trial_count += e['type'] == 'trial'
+                        if event_count > MAX_EVENTS or byte_count > MAX_BYTES or trial_count > MAX_TRIALS:
+                            raise LimitReached('本節課的紀錄已達安全容量上限；請匯出備份並聯絡教師')
                         c.execute('INSERT INTO events(student_id,event_id,type,payload,client_time,received_at) VALUES(?,?,?,?,?,?)',
-                                  (s['id'], e['id'], e['type'], json.dumps(e['payload'], ensure_ascii=False), e['client_time'], now()))
+                                  (s['id'], e['id'], e['type'], payload, e['client_time'], now()))
                     result = {'ack': [e['id'] for e in clean], 'state': state(c, s['id'])}
                     c.commit()  # Acknowledge only after a durable commit.
                     return self.send(data=result)
-        if self.command == 'GET' and not path.startswith('/api/'):
-            if path in ('/teacher', '/teacher.js'):
-                f = ROOT / 'backend' / ('teacher.html' if path == '/teacher' else 'teacher.js')
-            else:
-                f = (ROOT / 'docs' / (path.lstrip('/') or 'index.html')).resolve()
-                if not f.is_relative_to((ROOT / 'docs').resolve()): return self.send(404, {'error': '找不到頁面'})
-            if f.is_file() and not f.name.startswith('.'):
-                return self.send(data=f.read_bytes(), content_type=(mimetypes.guess_type(f.name)[0] or 'application/octet-stream') + '; charset=utf-8')
-        self.send(404, {'error': '找不到頁面'})
+        if self.role == 'admin' and self.command == 'GET':
+            local_files = {'/': ROOT / 'backend/teacher.html', '/teacher': ROOT / 'backend/teacher.html',
+                           '/teacher.js': ROOT / 'backend/teacher.js', '/style.css': ROOT / 'docs/style.css'}
+            if path in local_files:
+                return send_file(local_files[path], conditional=False)
+        return self.send(404, {'error': '找不到頁面'})
 
     def teacher_route(self, path, q):
         if path == '/api/teacher/lessons' and self.command == 'GET':
@@ -212,6 +257,8 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('學生代號須為不重複的 1–30 字文字')
                 name = str(p.get('name', '')).strip()
                 if not 1 <= len(name) <= 80: raise ValueError('請輸入課堂名稱（最多 80 字）')
+                if not storage_available() or c.execute('SELECT COUNT(*) FROM classes').fetchone()[0] >= 1000:
+                    raise LimitReached('課堂或儲存容量已達安全上限，請先封存資料')
                 cid, roster = secrets.token_hex(4), []
                 c.execute('INSERT INTO classes(id,name,lesson) VALUES(?,?,?)', (cid, name, json.dumps(lesson, ensure_ascii=False)))
                 for label in labels:
@@ -251,15 +298,66 @@ class Handler(BaseHTTPRequestHandler):
                 c.execute('INSERT OR REPLACE INTO grades VALUES(?,?)', (sid, json.dumps(grade, ensure_ascii=False)))
                 c.commit()
                 return self.send(data={'ok': True})
-        self.send(404, {'error': '找不到教師操作'})
+        return self.send(404, {'error': '找不到教師操作'})
+
+def make_app(role):
+    app = Flask('inquiry_' + role, static_folder=None)
+    app.config.update(MAX_CONTENT_LENGTH=262144, MAX_FORM_PARTS=1,
+                      TRUSTED_HOSTS=list(PUBLIC_HOSTS if role == 'public' else {'127.0.0.1', 'localhost'}))
+
+    @app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'OPTIONS'])
+    @app.route('/<path:path>', methods=['GET', 'POST', 'OPTIONS'])
+    def endpoint(path):
+        return Service(role).dispatch()
+
+    @app.errorhandler(HTTPException)
+    def http_error(error):
+        return Service(role).send(error.code, {'error': '請求無效或超過安全限制'})
+
+    @app.after_request
+    def headers(response):
+        origin = request.headers.get('Origin')
+        allowed = ORIGINS if role == 'public' else ADMIN_ORIGINS
+        if origin in allowed:
+            response.headers['Access-Control-Allow-Origin'] = origin
+            response.headers['Vary'] = 'Origin'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, ngrok-skip-browser-warning'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Max-Age'] = '600'
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['X-Frame-Options'] = 'DENY'
+        response.headers['Referrer-Policy'] = 'no-referrer'
+        response.headers['Permissions-Policy'] = 'camera=(), microphone=(), geolocation=()'
+        response.headers['Content-Security-Policy'] = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+        if role == 'public':
+            response.headers['Strict-Transport-Security'] = 'max-age=31536000'
+        if response.status_code == 429:
+            response.headers['Retry-After'] = '60'
+        return response
+    return app
+
 
 if __name__ == '__main__':
-    if len(ADMIN) < 24: raise SystemExit('先執行 python3 tools/init.py，或設定至少 24 字元的 ADMIN_TOKEN。')
+    if hasattr(os, 'geteuid') and os.geteuid() == 0:
+        raise SystemExit('不可用 root 運行服務。')
+    if len(ADMIN) < 24 or not ADMIN.isascii():
+        raise SystemExit('先執行 tools/init.py，設定至少 24 字元的 ASCII ADMIN_TOKEN。')
+    if PORT == ADMIN_PORT:
+        raise SystemExit('學生與教師入口必須使用不同埠號。')
     init()
-    print('學生端：http://127.0.0.1:' + str(PORT), flush=True)
-    print('教師端：http://127.0.0.1:' + str(PORT) + '/teacher', flush=True)
-    server = ThreadingHTTPServer(('127.0.0.1', PORT), Handler)
-    server.daemon_threads = True
-    server.request_queue_size = 128
-    try: server.serve_forever()
-    except KeyboardInterrupt: server.server_close()
+    options = dict(host='127.0.0.1', threads=8, connection_limit=64, backlog=64,
+                   max_request_body_size=262144, max_request_header_size=16384,
+                   channel_timeout=15, cleanup_interval=5, clear_untrusted_proxy_headers=True)
+    public = create_server(make_app('public'), port=PORT, map={}, **options)
+    admin = create_server(make_app('admin'), port=ADMIN_PORT, map={}, **options)
+    threading.Thread(target=public.run, daemon=True).start()
+    print('學生 API：http://127.0.0.1:' + str(PORT), flush=True)
+    print('教師控制台（僅本機）：http://127.0.0.1:' + str(ADMIN_PORT) + '/teacher', flush=True)
+    try:
+        admin.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        public.close()
+        admin.close()

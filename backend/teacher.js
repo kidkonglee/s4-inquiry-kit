@@ -1,6 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id);
-let token=sessionStorage.getItem('inquiry-teacher')||'', classes=[], rows=[], selected=null, detail=null, roster=null, loading=false;
+sessionStorage.removeItem('inquiry-teacher');
+let token='', classes=[], rows=[], selected=null, detail=null, roster=null, loading=false;
 const fieldNames={prediction:'預測',plan:'實驗計劃',analysis:'數據分析',claim:'主張',evidence:'證據',reasoning:'推理',reflection:'反思',transfer:'遷移'};
 async function api(path,method='GET',body) {
   const r=await fetch(path,{method,headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
@@ -11,7 +12,7 @@ function node(tag,text,cls){const n=document.createElement(tag);if(text!==undefi
 function dl(name,text,type){const url=URL.createObjectURL(new Blob([text],{type}));const a=node('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 async function start() {
   try{const lessons=await api('/api/teacher/lessons');$('lessons').replaceChildren();lessons.forEach(l=>{const o=node('option',l.title);o.value=l.id;$('lessons').append(o);});
-    $('auth').hidden=true;$('workspace').hidden=false;sessionStorage.setItem('inquiry-teacher',token);$('adminToken').value='';$('error').textContent='';await loadClasses();
+    $('auth').hidden=true;$('workspace').hidden=false;$('adminToken').value='';$('error').textContent='';await loadClasses();
   }catch(e){error(e);$('auth').hidden=false;$('workspace').hidden=true;}
 }
 async function loadClasses(wanted) {

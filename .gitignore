@@ -5,3 +5,6 @@ private/
 __pycache__/
 .DS_Store
 *.zip
+
+.python-runtime/
+.runtime-venv/

@@ -1,6 +1,6 @@
 # Run the S4 Inquiry Lab on your Mac
 
-Requires Python 3.10 or newer. No npm install, pip install, or build step is needed.
+Use a supported, security-updated Python. This version requires Flask and Waitress from requirements.txt; no npm or frontend build is needed.
 
 ## 1. Open Terminal in the project folder
 
@@ -16,20 +16,24 @@ If using the ZIP, extract it first and change to the extracted `s4-inquiry-kit` 
 
 ```sh
 python3 --version
-python3 tools/init.py
-python3 backend/server.py
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python tools/init.py
+python3 tools/start_server.py
 ```
 
 If `.env` already exists, skip `tools/init.py`; the initializer will preserve the existing file. Keep Terminal running while using the app. Press Control+C to stop the server.
 
-The deployed `docs/config.js` points to this Mac's ngrok HTTPS URL. For a local-only test without ngrok, change it to `apiBase: ""`, which uses the local API on port 8000.
+Read [the security guide](guides/06-安全加固與使用.md) for the updated setup.
+
+The deployed `docs/config.js` points to this Mac's ngrok HTTPS URL. Keep ngrok running when testing the published worksheet. Port 8000 serves only student APIs; the teacher dashboard uses the separate local port 8001.
 
 The deployed student site is <https://kidkonglee.github.io/s4-inquiry-kit/>. It still requires the MacBook backend and ngrok to be running to receive student records.
 
 ## 3. Open both pages
 
-- Student worksheet: <http://127.0.0.1:8000/>
-- Teacher dashboard: <http://127.0.0.1:8000/teacher>
+- Student worksheet: <https://kidkonglee.github.io/s4-inquiry-kit/> (port 8000 now serves only student APIs)
+- Teacher dashboard: <http://127.0.0.1:8001/teacher>
 
 Open the teacher secret file locally:
 
@@ -55,7 +59,7 @@ Without joining a class, the student page is a local demonstration: its records 
 Keep the Python server running. In a second Terminal window:
 
 ```sh
-ngrok http 8000
+python3 tools/start_tunnel.py
 ```
 
 Then:

@@ -8,7 +8,12 @@ const uid = () => crypto.randomUUID ? crypto.randomUUID() : Date.now() + '_' + M
 const empty = () => ({answers:Object.fromEntries(fields.map(k=>[k,''])),target:'force',trials:[],submitted:false});
 function readStore(k, fallback) { try { return JSON.parse(localStorage.getItem(k)) || fallback; } catch { return fallback; } }
 function putStore(k, v) { try { localStorage.setItem(k,JSON.stringify(v)); } catch { memoryOnly=true; $('message').textContent='裝置儲存空間不足或不允許儲存。請保持頁面開啟，並立即匯出紀錄。'; } }
-session = readStore('inquiry-session', null);
+// Keep the bearer token within this tab, while retaining offline answers separately.
+try {
+  session=JSON.parse(sessionStorage.getItem('inquiry-session')) || readStore('inquiry-session',null);
+  if(session)sessionStorage.setItem('inquiry-session',JSON.stringify(session));
+  localStorage.removeItem('inquiry-session');
+} catch {session=null;}
 function storageKey() { return session ? 'inquiry-student-' + session.student_id : 'inquiry-demo-' + lesson.id; }
 function persist() { putStore(storageKey(), {base,pending,drafts,lesson}); updateSync(); }
 function loadLocal() { const old=readStore(storageKey(),{}); if(session&&old.lesson)configure(old.lesson);base=old.base || empty(); pending=old.pending || []; drafts=old.drafts || {}; }
@@ -49,7 +54,11 @@ async function flush() {
   busy=true; updateSync();
   try {
     while(pending.length) {
-      const batch=pending.slice(0,40);
+      const batch=[];
+      for(const e of pending.slice(0,40)) {
+        if(new TextEncoder().encode(JSON.stringify({events:[...batch,e]})).length>240000)break;
+        batch.push(e);
+      }
       const r=await request('/api/events','POST',{events:batch});
       base=r.state; const ack=new Set(r.ack);
       pending=pending.filter(e=>!ack.has(e.id)); persist();
@@ -119,7 +128,7 @@ function exportRecord() {
   download('inquiry-record.json',JSON.stringify(record,null,2),'application/json');
 }
 function download(name,data,type) {const url=URL.createObjectURL(new Blob([data],{type}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
-fields.forEach(k=>$(k).addEventListener('input',()=>{drafts[k]=$(k).value;persist();clearTimeout(saveTimer);saveTimer=setTimeout(captureAnswers,700);}));
+fields.forEach(k=>{$(k).maxLength=6000;$(k).addEventListener('input',()=>{drafts[k]=$(k).value;persist();clearTimeout(saveTimer);saveTimer=setTimeout(captureAnswers,700);});});
 $('target').addEventListener('change',()=>{const value=$('target').value;captureAnswers();event('target',{value});flush();});
 $('savePlan').onclick=()=>{captureAnswers();$('message').textContent='預測與計劃已保存在此裝置；正式課堂會自動同步。';};
 ['force','mass'].forEach(k=>{ $(k).oninput=sliders;$(k).onchange=()=>{event('slider',{force:+$('force').value,mass:+$('mass').value});flush();}; });
@@ -141,12 +150,14 @@ $('submit').onclick=()=>{
   event('submit',{});flush();
 };
 $('backup').onclick=exportRecord;
-$('logout').onclick=()=>{captureAnswers();if(pending.length){$('message').textContent='尚有待傳紀錄，請先等候同步，或匯出備份後再切換。';return;}session=null;localStorage.removeItem('inquiry-session');location.reload();};
+$('logout').onclick=()=>{captureAnswers();if(pending.length){$('message').textContent='尚有待傳紀錄，請先等候同步，或匯出備份後再切換。';return;}session=null;sessionStorage.removeItem('inquiry-session');localStorage.removeItem('inquiry-session');location.reload();};
 $('joinForm').onsubmit=async e=>{
   e.preventDefault();if(!apiBase){$('joinError').textContent='教師尚未設定後端網址，目前只可示範。';return;}
-  if(session&&pending.length){$('joinError').textContent='目前學生還有待傳紀錄，請保留備份並先完成同步。';return;}
+  captureAnswers();
+  if(session&&pending.length&&$('classId').value.trim()!==session.class_id){$('joinError').textContent='仍有待傳紀錄，請用原課堂和原學生的登入碼重新登入。';return;}
   try {const r=await request('/api/join','POST',{class_id:$('classId').value.trim(),code:$('joinCode').value.trim()});
-    session={token:r.token,student_id:r.student_id,label:r.label,class_id:r.class_id};putStore('inquiry-session',session);configure(r.lesson);loadLocal();base=r.state;persist();render();$('loginPanel').open=false;$('joinCode').value='';$('joinError').textContent='';flush();
+    if(session&&pending.length&&r.student_id!==session.student_id)throw new Error('仍有待傳紀錄，只可用原學生的登入碼重新登入。');
+    session={token:r.token,student_id:r.student_id,label:r.label,class_id:r.class_id};sessionStorage.setItem('inquiry-session',JSON.stringify(session));configure(r.lesson);loadLocal();base=r.state;persist();render();$('loginPanel').open=false;$('joinCode').value='';$('joinError').textContent='';flush();
   }catch(err){$('joinError').textContent=err.message;}
 };
 window.addEventListener('online',flush);

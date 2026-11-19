@@ -24,8 +24,10 @@ class SystemTest(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory()
         with socket.socket() as s:
             s.bind(('127.0.0.1', 0)); cls.port = s.getsockname()[1]
+        with socket.socket() as s:
+            s.bind(('127.0.0.1', 0)); cls.admin_port = s.getsockname()[1]
         cls.admin = secrets.token_urlsafe(32)
-        cls.env = dict(os.environ, ADMIN_TOKEN=cls.admin, PORT=str(cls.port),
+        cls.env = dict(os.environ, ADMIN_TOKEN=cls.admin, PORT=str(cls.port), ADMIN_PORT=str(cls.admin_port),
                        CLASSROOM_DB=str(Path(cls.temp.name) / 'test.sqlite'),
                        ALLOWED_ORIGINS='https://school.example')
         cls.launch()
@@ -49,7 +51,8 @@ class SystemTest(unittest.TestCase):
         headers = {'Content-Type': 'application/json'}
         if token: headers['Authorization'] = 'Bearer ' + token
         if origin: headers['Origin'] = origin
-        req = urllib.request.Request('http://127.0.0.1:' + str(cls.port) + path,
+        port = cls.admin_port if path.startswith('/api/teacher/') else cls.port
+        req = urllib.request.Request('http://127.0.0.1:' + str(port) + path,
                                      data=json.dumps(payload).encode() if payload is not None else None, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=10) as r:

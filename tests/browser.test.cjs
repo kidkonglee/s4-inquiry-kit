@@ -7,12 +7,12 @@ const admin=fs.readFileSync(root+'/.env','utf8').split('\n').find(x=>x.startsWit
  const browser=await chromium.launch({headless:true});
  const errors=[];
  const teacher=await browser.newPage({viewport:{width:1440,height:1000}});teacher.on('pageerror',e=>errors.push(e.message));
- await teacher.goto('http://127.0.0.1:8000/teacher');
+ await teacher.goto('http://127.0.0.1:8001/teacher');
  await teacher.locator('#adminToken').fill(admin);await teacher.locator('#authForm button').click();await teacher.locator('#workspace').waitFor({state:'visible'});
  await teacher.locator('#createPanel summary').click();await teacher.locator('#className').fill('瀏覽器驗收 · 測試資料');await teacher.locator('#labels').fill('TEST-BYOD-01\nTEST-BYOD-02');await teacher.locator('#createForm button').click();await teacher.locator('#rosterBox').waitFor({state:'visible'});
  const roster=(await teacher.locator('#roster').innerText()).split('\n');const cid=roster[0].split('：')[1];const code=roster[1].split('\t')[1];
  const ctx=await browser.newContext({viewport:{width:1024,height:900},isMobile:true,hasTouch:true});
- const page=await ctx.newPage();page.on('pageerror',e=>errors.push(e.message));await page.goto('http://127.0.0.1:8000');await page.locator('#title').filter({hasText:'同一部小車'}).waitFor();
+ const page=await ctx.newPage();page.on('pageerror',e=>errors.push(e.message));await page.goto(process.env.STUDENT_URL || 'https://kidkonglee.github.io/s4-inquiry-kit/', {waitUntil:'domcontentloaded',timeout:60000});await page.locator('#title').filter({hasText:'同一部小車'}).waitFor();
  assert((await page.locator('#mode').innerText()).includes('示範模式'));
  await page.locator('#loginPanel summary').click();await page.locator('#classId').fill(cid);await page.locator('#joinCode').fill(code);await page.locator('#joinForm button').click();await page.locator('#identity').filter({hasText:'TEST-BYOD-01'}).waitFor();
  await page.locator('#prediction').fill('質量保持不變，合力增大時加速度增大。');await page.locator('#plan').fill('保持 2 kg，測 2、4、6 N；若不是比例關係就修正。');
